@@ -36,7 +36,7 @@
   (let ((map (make-sparse-keymap)))
     ;; Put our definitions on the same keys as Brief
     (define-key map [(control return)] 'brief-insert-line)
-    (define-key map "\M-d" 'brief-kill-line)
+    (define-key map "\M-d" 'brief-delete-line)
     (define-key map "\M-l" 'brief-mark-line)
     (define-key map [(kp-add)] 'brief-copy-region)
     (define-key map [(kp-subtract)] 'brief-kill-region)
@@ -109,7 +109,7 @@ Set this to nil to conserve valuable mode line space."
   :type 'hook
   :group 'brief)
 
-(defconst brief-version "1.01"
+(defconst brief-version "1.02"
   "The version of the Brief emulator.")
 
 (defun brief-version ()
@@ -141,9 +141,29 @@ Emulates the Brief insert-line function. With argument, do not indent."
 ;;
 ;; Brief delete-line command
 ;;
+(defun brief-delete-line (&optional arg)
+  "Delete the current line from anywhere on the line.
+Emulates the Brief delete-line function. With argument, do it that many times."
+  (interactive "*P")
+  (let ((count (prefix-numeric-value arg))
+	(column (current-column))
+	start end)
+    (beginning-of-line)
+    (setq start (point))
+    (forward-line count)
+    (setq end (point))
+    (delete-region start end)
+    (move-to-column column)))
+
+;;
+;; Brief kill-line command
+;;
+;; Note that this command is not currently mapped to a key, as its
+;; functionality is subsumed by brief-kill-region.
+;;
 (defun brief-kill-line (&optional arg)
   "Kill the current line from anywhere on the line.
-Emulates the Brief delete-line function. With argument, do it that many times."
+With argument, do it that many times."
   (interactive "*P")
   (let ((count (prefix-numeric-value arg))
 	(column (current-column)))
