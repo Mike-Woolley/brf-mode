@@ -45,12 +45,16 @@
     (define-key map [(kp-delete)] 'brief-delete)
     (define-key map [(meta up)] 'brief-row-up)
     (define-key map [(meta down)] 'brief-row-down)
+    (define-key map [(home)] 'brief-home)
+    (define-key map [(end)] 'brief-end)
 
     ;; Also put them on the Emacs keys
     (substitute-key-definition 'kill-ring-save 'brief-copy-region map (current-global-map))
     (substitute-key-definition 'kill-region 'brief-kill-region map (current-global-map))
     (substitute-key-definition 'yank 'brief-yank map (current-global-map))
     (substitute-key-definition 'yank-pop 'brief-yank-pop map (current-global-map))
+    (substitute-key-definition 'beginning-of-line 'brief-home map (current-global-map))
+    (substitute-key-definition 'end-of-line 'brief-end map (current-global-map))
 
     ;; Try and find the existing commands for scrolling up/down,
     ;; as these are different in Emacs & XEmacs
@@ -89,6 +93,12 @@ use either M-x customize or the function `brief-mode'."
   :initialize 'custom-initialize-default
   :group 'brief)
 
+(defcustom brief-mode-modeline-string " Brief"
+  "String to display in the modeline when Brief emulation mode is enabled.
+Set this to nil to conserve valuable mode line space."
+  :type 'string
+  :group 'brief)
+
 (defcustom brief-load-hook nil
   "Hooks to run after loading the Brief emulator package."
   :type 'hook
@@ -99,10 +109,7 @@ use either M-x customize or the function `brief-mode'."
   :type 'hook
   :group 'brief)
 
-(defconst brief-mode-modeline-string " Brief"
-  "String to display in the modeline when Brief emulation mode is enabled.")
-
-(defconst brief-version "1.00"
+(defconst brief-version "1.01"
   "The version of the Brief emulator.")
 
 (defun brief-version ()
@@ -443,6 +450,39 @@ This is a helper function used by brief-row-up/down."
 (defun brief-scroll-command-p (cmd)
   "Determine if the given command is a Brief scrolling command."
   (and (symbolp cmd) (get cmd 'brief-scroll-command)))
+
+;;
+;; Brief Home/End key functions
+;;
+(defvar brief-last-last-command nil
+  "The previous value of `last-command'.
+Used in the implementation of brief-home/end.")
+
+(defun brief-home ()
+  "\"Home\" the point, the way Brief does it.
+The first use moves point to beginning of the line.  Second
+consecutive use moves point to beginning of the screen.  Third
+consecutive use moves point to the beginning of the buffer."
+  (interactive)
+  (if (eq last-command 'brief-home)
+      (if (eq brief-last-last-command 'brief-home)
+	  (goto-char (point-min))
+	(move-to-window-line 0))
+    (beginning-of-line))
+  (setq brief-last-last-command last-command))
+      
+(defun brief-end ()
+  "\"End\" the point, the way Brief does it.
+The first use moves point to end of the line.  Second
+consecutive use moves point to the end of the screen.  Third
+consecutive use moves point to the end of the buffer."
+  (interactive)
+  (if (eq last-command 'brief-end)
+      (if (eq brief-last-last-command 'brief-end)
+	  (goto-char (point-max))
+	(move-to-window-line -1))
+    (end-of-line))
+  (setq brief-last-last-command last-command))
 
 ;;
 ;; Brief Cursor Motion Undo
