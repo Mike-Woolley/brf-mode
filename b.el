@@ -2,8 +2,8 @@
 
 ;; Copyright (C) 2001 Mike Woolley mike@bulsara.com
 ;; Author: Mike Woolley <mike@bulsara.com>
-;; Version: 1.06
-;; Keywords: brief emulator
+;; Version: 1.07
+;; Keywords: brief editing tools
 
 ;; This file is not part of Emacs
 
@@ -24,11 +24,26 @@
 
 ;;; Commentary:
 ;;
-;;  This package provides an emulation of the Brief editor under Emacs.
-;;  However, only those functions which don't exist in Emacs are emulated
-;;  and functions common to both retain their Emacs keybindings.
+;;  This package provides an implementation of the some features that
+;;  I miss from the old DOS editor `Brief'. Principally, these are:
+;;
+;;  * Line-mode cut and paste.
+;;  * Column-mode cut and paste (not implemented yet).
+;;  * Decent paging and scrolling.
+;;  * Temporary bookmarks.
+;;  * Cursor motion undo (not fully working yet).
+;;
+;;  However, the functions have been implemented in an Emacs-style
+;;  way, respond to prefix args and where they override Emacs
+;;  functions live on the Emacs key bindings etc.
+;;
+;;  The code has been tested on Emacs 20, Emacs 21 pretest
+;;  and XEmacs 21.1 & 21.2.
 
 ;;; Change Log:
+;;
+;;  Version 1.07 2001-08-12 Mike Woolley <mike@bulsara.com>
+;;  * Lots of small changes and bug fixes.
 ;;
 ;;  Version 1.06 2001-08-02 Mike Woolley <mike@bulsara.com>
 ;;  * Renamed to b-mode, due to the large number of `brief.el's out
@@ -74,7 +89,7 @@
 (defgroup b nil
   "Emulator for Brief."
   :prefix "b-"
-  :group 'emulations)
+  :group 'editing)
 
 ;;;###autoload
 (defcustom b-mode nil
@@ -87,7 +102,7 @@ use either \\[execute-extended-command] customize or the function `b-mode'."
   :type 'boolean
   :set (lambda (symbol value) (b-mode (or value 0)))
   :initialize 'custom-initialize-default
-  :require 'brief
+  :require 'b
   :version "20.4"
   :group 'b)
 
@@ -103,7 +118,7 @@ use either \\[execute-extended-command] customize or the function `b-mode'."
   :group 'b)
 
 (defcustom b-mode-modeline-string " B"
-  "String to display in the modeline when B mode is enabled.
+  "String to display in the mode-line when B mode is enabled.
 Set this to nil to conserve valuable mode line space."
   :type 'string
   :group 'b)
@@ -120,7 +135,7 @@ Set this to nil to conserve valuable mode line space."
 ;;
 ;; Version
 ;;
-(defconst b-version "1.06"
+(defconst b-version "1.07"
   "Version number of B mode.")
 
 (defun b-version ()
@@ -180,19 +195,23 @@ Returns the previous setting."
       (setq transient-mark-mode arg))))
 
 (defun b-activate-region ()
-  "Ensure region is highlited correctly in XEmacs.
+  "Ensure region is highlit correctly in XEmacs.
 This function does nothing in GNU Emacs."
   (when b-xemacs-flag
     (if zmacs-region-active-p
 	(zmacs-update-region)
       (zmacs-activate-region))))
 
-(defun b-deactivate-region ()
-  "Ensure region is deactivated in XEmacs.
-This function does nothing in GNU Emacs."
-  (when (and b-xemacs-flag
-	     zmacs-region-active-p)
-    (zmacs-deactivate-region)))
+(defun b-deactivate-region (&optional force)
+  "Ensure region is deactivated.
+This function does nothing in GNU Emacs, as redisplay clears the region,
+unless the optional arg FORCE is set."
+  (cond (b-xemacs-flag
+	 (when zmacs-region-active-p
+	   (zmacs-deactivate-region)))
+	(t ; GNU Emacs
+	 (when force
+	   (deactivate-mark)))))
 
 (defun b-keep-region ()
   "Ensure that the current command keeps the region in XEmacs.
@@ -252,6 +271,10 @@ With ARG, remove the bookmark instead." number)
   "Set bookmark NUMBER at point."
   (interactive (b-read-bookmark-number "Set Bookmark: "))
 
+  ;; Don't allow bookmark to be dropped in the minibuffer
+  (when (window-minibuffer-p (selected-window))
+    (error "Bookmark not allowed in minibuffer"))
+
   ;; Lookup the bookmark and calculate the position of the overlay
   (let ((bookmark (aref b-bookmarks number))
 	(start (b-bol-position 1))
@@ -282,7 +305,8 @@ With ARG, remove the bookmark instead." number)
 	     (setf (aref b-bookmarks number)
 		   (make-b-bookmark :number number :marker marker :overlay overlay))))
 
-	  (t ;; Move bookmark to new location
+	  ;; Move existing bookmark to new location
+	  (t
 	   (let ((buffer (current-buffer)))
 	     (move-marker (b-bookmark-marker bookmark) (point) buffer)
 	     (move-overlay (b-bookmark-overlay bookmark) start end buffer)))))
@@ -342,7 +366,7 @@ With ARG, remove the bookmark instead." number)
   "Jump to the previous bookmark.
 With ARG jump to the next one."
   (interactive "P")
-  (b-next-bookmark (if arg nil t)))
+  (b-next-bookmark (null arg)))
 
 (defun b-list-bookmarks ()
   (interactive)
@@ -353,36 +377,38 @@ With ARG jump to the next one."
   (eval-and-compile
     (require 'generic-menu))
 
-  (gm-popup :elements (append b-bookmarks nil) ; Turn the vector into a list
+  (gm-popup :buffer-name "*Bookmarks*"
+	    :header-line "Bookmarks: [SELECT] to Jump to bookmark, [q] to Quit."
 	    :max-entries b-max-bookmarks
-	    :header-line "Bookmarks: [SELECT] to Jump, [q] to Quit."
 	    :truncate-lines t
 	    :regexp-start-position (format "^[* ][ \t]+%d" b-current-bookmark)
 
+	    :elements (loop for idx from 0 to (1- b-max-bookmarks)
+			    collect idx)
+
 	    :select-callback
-	    #'(lambda (bookmark)
-		(cond ((b-valid-bookmark-p bookmark)
-		       (gm-quit)
-		       (b-jump-to-bookmark (b-bookmark-number bookmark)))
-		      (t ; Bookmark not set
-		       (ding))))
+	    #'(lambda (idx)
+		(let ((bookmark (aref b-bookmarks idx)))
+		  (cond ((b-valid-bookmark-p bookmark)
+			 (gm-quit)
+			 (b-jump-to-bookmark idx))
+			(t ; Bookmark not set
+			 (message "Bookmark %d has not been set" idx)
+			 (ding)))))
 
  	    :display-string-function
-	    #'(lambda (bookmark)
-		(cond ((null bookmark)
-		       (format "    <NOT SET>"))
-		      ((not (b-valid-bookmark-p bookmark))
-		       (format "  %d <NOT SET>"
-			       (b-bookmark-number bookmark)))
-		      (t
-		       (let* ((number (b-bookmark-number bookmark))
-			      (marker (b-bookmark-marker bookmark))
-			      (buffer (marker-buffer marker)))
-			 (format "%s %d\t%d%%\t%s"
-				 (if (= b-current-bookmark number) "*" " ")
-				 number
-				 (/ (* (marker-position marker) 100) (buffer-size buffer))
-				 buffer)))))))
+	    #'(lambda (idx)
+		(let ((bookmark (aref b-bookmarks idx)))
+		  (cond ((b-valid-bookmark-p bookmark)
+			 (let* ((marker (b-bookmark-marker bookmark))
+				(buffer (marker-buffer marker)))
+			   (format "%s %d\t%d%%\t%s"
+				   (if (= b-current-bookmark idx) "*" " ")
+				   idx
+				   (/ (* (marker-position marker) 100) (buffer-size buffer))
+				   buffer)))
+			(t ; Bookmark not set
+			 (format "  %d <NOT SET>" idx)))))))
 
 ;;
 ;; Keymap
@@ -399,13 +425,12 @@ With ARG jump to the next one."
     (define-key map [(kp-subtract)] 'b-kill-region)
     (define-key map [(kp-multiply)] 'undo)
     (define-key map [(delete)] 'b-delete)
-;;     (define-key map [(kp-delete)] 'b-delete)
     (define-key map [(meta up)] 'b-row-up)
     (define-key map [(meta down)] 'b-row-down)
     (define-key map [(home)] 'b-home)
     (define-key map [(end)] 'b-end)
     (define-key map "\t" 'b-tab)
-    (define-key map "\M-+" 'b-next-bookmark)
+    (define-key map "\M-=" 'b-next-bookmark)
     (define-key map [(meta kp-add)] 'b-next-bookmark)
     (define-key map "\M--" 'b-prev-bookmark)
     (define-key map [(meta kp-subtract)] 'b-prev-bookmark)
@@ -428,16 +453,15 @@ With ARG jump to the next one."
     ;; as these are different in Emacs & XEmacs
     (let ((scroll-up-cmd (global-key-binding [(next)]))
 	  (scroll-down-cmd (global-key-binding [(prior)])))
-      (if scroll-up-cmd
-	  (substitute-key-definition scroll-up-cmd 'b-page-down map (current-global-map)))
-      (if scroll-down-cmd
-	  (substitute-key-definition scroll-down-cmd 'b-page-up map (current-global-map))))
+      (when scroll-up-cmd
+	(substitute-key-definition scroll-up-cmd 'b-page-down map (current-global-map)))
+      (when scroll-down-cmd
+	(substitute-key-definition scroll-down-cmd 'b-page-up map (current-global-map))))
 
     ;; Setup the bookmarks on the M-digit keys, like in Brief
     ;; Prefix args will have to be entered with the C-digit or C-U number methods...
     (dotimes (digit b-max-bookmarks)
-      (define-key map (vector (list 'meta (string-to-char (number-to-string digit))))
-	(b-make-set-bookmark digit)))
+      (define-key map (vector (list 'meta (+ digit ?0))) (b-make-set-bookmark digit)))
     (define-key map "\M-j" 'b-jump-to-bookmark)
 
     (setq b-mode-map map)))
@@ -487,11 +511,11 @@ With ARG, do it that many times."
 	(column (current-column)))
     (beginning-of-line)
     (kill-line count)
-    (b-set-line-kill)
+    (b-set-line-kill (car kill-ring))
     (move-to-column column)))
 
 ;;
-;; Brief mark-line command
+;; Brief line-mode commands
 ;;
 (defvar b-line-mark-min nil
   "The minimum position of the mark in line marking mode.
@@ -505,12 +529,14 @@ This is restored after saving/killing the region.")
 
 (defun b-start-line-marking ()
   "Start line-marking mode."
+  (setq b-line-mark-col (current-column))
   (make-local-hook 'post-command-hook)
   (add-hook 'post-command-hook 'b-mark-line-hook nil t))
 
 (defun b-stop-line-marking ()
   "Stops line-marking mode."
-  (remove-hook 'post-command-hook  'b-mark-line-hook t))
+  (remove-hook 'post-command-hook  'b-mark-line-hook t)
+  (move-to-column b-line-mark-col))
 
 (defun b-line-marking-p ()
   "Return true if the buffer is in line marking mode."
@@ -519,34 +545,34 @@ This is restored after saving/killing the region.")
 (defun b-mark-line-hook ()
   "Ensure that the point and mark are correctly positioned for
 line-marking after cursor motion commands."
-  (if (not (b-region-active-p))
-      (b-stop-line-marking)
+  (cond ((b-region-active-p)
+	 ;; Marking - emulate Brief "line mode"
+	 (let ((point (point))
+	       (mark (mark)))
+	   ;; Ensure we're at the beginning of the line
+	   (unless (bolp)
+	     (beginning-of-line)
+	     (when (> point mark)
+	       (forward-line)))
 
-    ;; Marking - emulate Brief "line mode"
-    (let ((point (point))
-	  (mark (mark)))
-      ;; Ensure we're at the beginning of the line
-      (unless (bolp)
-	(beginning-of-line)
-	(if (> point mark)
-	    (forward-line)))
+	   ;; Ensure mark and point are straddling the original line
+	   (cond ((< point mark)
+		  (when (/= mark b-line-mark-max)
+		    (set-mark b-line-mark-max)))
+		 ((> point mark)
+		  (when (/= mark b-line-mark-min)
+		    (set-mark b-line-mark-min)))
+		 ;; point = mark
+		 ((= point b-line-mark-max) ; point = mark-max
+		  (forward-line 1)
+		  (set-mark b-line-mark-min))
+		 (t ; point = mark-min
+		  (forward-line -1)
+		  (set-mark b-line-mark-max)))
 
-      ;; Ensure mark and point are straddling the original line
-      (cond ((< point mark)
-	     (if (/= mark b-line-mark-max)
-		 (set-mark b-line-mark-max)))
-	    ((> point mark)
-	     (if (/= mark b-line-mark-min)
-		 (set-mark b-line-mark-min)))
-	    (t				; point = mark
-	     (cond ((= mark b-line-mark-max)
-		    (forward-line 1)
-		    (set-mark b-line-mark-min))
-		   (t			; point = mark-min
-		    (forward-line -1)
-		    (set-mark b-line-mark-max)))))
-
-      (b-activate-region))))
+	   (b-activate-region)))
+	(t ; Not marking
+	 (b-stop-line-marking))))
 
 (defun b-mark-line (&optional arg)
   "Mark the current line from anywhere on the line.
@@ -555,18 +581,51 @@ With ARG, do it that many times."
   (interactive "P")
   (let ((lines (prefix-numeric-value arg)))
     (when (/= lines 0)
-      (setq b-line-mark-col (current-column))
       (b-start-line-marking)
       (beginning-of-line)
       (setq b-line-mark-min (point))
       (forward-line)
       (setq b-line-mark-max (point))
-      (cond ((bolp)			; Normal case
+      (cond ((bolp) ; Normal case
 	     (forward-line (1- lines))
 	     (push-mark b-line-mark-min nil t))
-	    (t				; Case where last line is incomplete
+	    (t ; Case where last line is incomplete
 	     (goto-char b-line-mark-min)
 	     (push-mark b-line-mark-max nil t))))))
+
+(defun b-mark-default ()
+  "Mark the default unit in the buffer.
+Normally this is the current line, but in lisp modes it is the containing sexp."
+      (cond ((b-lisp-mode-p)
+	     (condition-case nil
+		 (progn
+		   (unless (= (following-char) ?\()
+		     (backward-up-list))
+		   (mark-sexp))
+	       (error (b-mark-line))))
+	    (t ; Non-lisp mode
+	     (b-mark-line))))
+
+(defun b-lisp-mode-p ()
+  "Return non-nil if the current major mode is a lisp mode.
+This is determined heuristically by looking for `lisp' in the mode name."
+  (string-match "lisp" mode-name))
+
+(defun b-emphasise-region (beg end)
+  "Emphasise the region like `kill-ring-save' does."
+  ;; This code is based on code in `kill-ring-save' from simple.el in GNU Emacs
+  (let ((other-end (if (= (point) beg) end beg))
+	(opoint (point))
+	(inhibit-quit t))		; Inhibit quitting
+    (when (pos-visible-in-window-p other-end (selected-window))
+      ;; Swap point and mark.
+      (set-marker (mark-marker) (point) (current-buffer))
+      (goto-char other-end)
+      (sit-for 1)
+      ;; Swap back.
+      (set-marker (mark-marker) other-end (current-buffer))
+      (goto-char opoint)))
+  (b-deactivate-region t))
 
 ;;
 ;; Brief copy-region command
@@ -577,15 +636,34 @@ If there is no active region then the current line is copied.
 Emulates the Brief copy function."
   (interactive)
   (unless (b-region-active-p)
-    (b-mark-line))
+    (b-mark-default))
+  ;; Use call-interactively here so that the line is highlighted
   (call-interactively 'kill-ring-save)
   (when (b-line-marking-p)
-    (b-set-line-kill)
+    (b-set-line-kill (car kill-ring))
     (b-stop-line-marking)
     (when (> (point) (mark))
-      (forward-line -1))
-    (move-to-column b-line-mark-col))
+      (forward-line -1)
+      (move-to-column b-line-mark-col)))
   (b-deactivate-region))
+
+(defun b-copy-to-register (register)
+  "Copy the current active region to a register.
+If there is no active region then the current line is copied."
+  (interactive "cCopy-to-register:")
+  (unless (b-region-active-p)
+    (b-mark-default))
+  (let ((beg (region-beginning))
+	(end (region-end)))
+    (copy-to-register register beg end)
+    (when (b-line-marking-p)
+      (b-set-line-kill (get-register register))
+      (b-stop-line-marking)
+      (when (> (point) (mark))
+	(forward-line -1)
+	(move-to-column b-line-mark-col)))
+    ;; Emphasise the region like `kill-ring-save' does
+    (b-emphasise-region beg end)))
 
 ;;
 ;; Brief kill-region command
@@ -596,12 +674,22 @@ If there is no active region then the current line is killed.
 Emulates the Brief cut function."
   (interactive "*")
   (unless (b-region-active-p)
-    (b-mark-line))
-  (call-interactively 'kill-region)
+    (b-mark-default))
+  (kill-region (region-beginning) (region-end))
   (when (b-line-marking-p)
-    (b-set-line-kill)
-    (b-stop-line-marking)
-    (move-to-column b-line-mark-col)))
+    (b-set-line-kill (car kill-ring))
+    (b-stop-line-marking)))
+
+(defun b-kill-to-register (register)
+  "Kill the current active region to a register.
+If there is no active region then the current line is killed."
+  (interactive "*cCopy-to-register:")
+  (unless (b-region-active-p)
+    (b-mark-default))
+  (copy-to-register register (region-beginning) (region-end) t)
+  (when (b-line-marking-p)
+    (b-set-line-kill (get-register register))
+    (b-stop-line-marking)))
 
 ;;
 ;; Brief delete command
@@ -611,26 +699,32 @@ Emulates the Brief cut function."
 If there is no active region then ARG characters following point are deleted.
 Emulates the Brief delete function."
   (interactive "*P")
-  (if (not (b-region-active-p))
-      (delete-char (prefix-numeric-value arg))
-    (call-interactively 'delete-region)
-    (when (b-line-marking-p)
-      (b-stop-line-marking)
-      (move-to-column b-line-mark-col))))
+  (cond ((b-region-active-p)
+	 (delete-region (region-beginning) (region-end))
+	 (when (b-line-marking-p)
+	   (b-stop-line-marking)))
+	(t ; No active region
+	 (delete-char (prefix-numeric-value arg)))))
 
 ;;
-;; Brief Yank & Yank-pop commands
+;; Line kill helper functions
 ;;
-(defun b-set-line-kill ()
-  "Make the front of the `kill-ring' a line-mode kill.
-This is done by adding a text property."
+(defmacro b-set-line-kill (place)
+  "Make the string at PLACE a line-mode kill.
+This is done by adding a text property and ensuring that the (last)
+line is terminated with a newline."
   ;; Ensure the line is terminated with a newline
-  (let* ((kill (car kill-ring))
-	 (len (length kill)))
-    (unless (and (> len 0) (= (aref kill (1- len)) ?\n))
-      (setcar kill-ring (concat kill (string ?\n)))))
-  ;; Indicate that this is a line-mode kill with a text property
-  (put-text-property 0 1 'b-line-kill t (car kill-ring)))
+  `(let ((line (b-terminate-line ,place)))
+     ;; Indicate that this is a line-mode kill with a text property
+     (put-text-property 0 1 'b-line-kill t line)
+     (setf ,place line)))
+
+(defun b-terminate-line (line)
+  "Ensure LINE is terminated with a newline."
+  (let ((len (length line)))
+    (if (and (> len 0) (= (aref line (1- len)) ?\n))
+	line
+      (concat line "\n"))))
 
 (defun b-clear-line-kill (pos)
   "Remove the line-mode kill property from text at position POS in the buffer."
@@ -640,6 +734,9 @@ This is done by adding a text property."
   "Test if STRING is a line-mode kill."
   (get-text-property 0 'b-line-kill string))
 
+;;
+;; Brief Yank & Yank-pop commands
+;;
 (defvar b-yank-col 0
   "The original column where `b-yank' was initiated.
 This is restored after the yank.")
@@ -654,8 +751,8 @@ was killed in line-mode and also indent it."
   (setq this-command 'yank)
   (setq b-yank-col (current-column))
   (cond ((b-line-kill-p (current-kill (cond ((listp arg) 0)
-						((eq arg '-) -1)
-						(t (1- arg))) t))
+					    ((eq arg '-) -1)
+					    (t (1- arg))) t))
 	 (beginning-of-line)
 	 (yank arg)
 	 (let ((point (point))
@@ -665,7 +762,7 @@ was killed in line-mode and also indent it."
 	 (setq b-last-yank-was-line t)
 	 (move-to-column b-yank-col))
 
-	(t				; Not line kill
+	(t ; Not line kill
 	 (yank arg)
 	 (setq b-last-yank-was-line nil))))
 
@@ -677,12 +774,13 @@ was killed in line-mode and also indent it."
     (error "Previous command was not a yank"))
   (setq this-command 'yank)
   (cond ((b-line-kill-p (current-kill arg t))
-	 (if b-last-yank-was-line
-	     (beginning-of-line)
-	   (delete-region (point) (mark t))
-	   (beginning-of-line)
-	   (set-mark (point))
-	   (setq b-last-yank-was-line t))
+	 (cond (b-last-yank-was-line
+		(beginning-of-line))
+	       (t
+		(delete-region (point) (mark t))
+		(beginning-of-line)
+		(set-mark (point))
+		(setq b-last-yank-was-line t)))
 	 (yank-pop arg)
 	 (let ((point (point))
 	       (mark (mark t)))
@@ -690,7 +788,7 @@ was killed in line-mode and also indent it."
 	   (indent-region (min mark point) (max mark point) nil))
 	 (move-to-column b-yank-col))
 
-	(t				; Not line kill
+	(t ; Not line kill
 	 (when b-last-yank-was-line
 	   (beginning-of-line)
 	   (delete-region (point) (mark t))
@@ -698,6 +796,10 @@ was killed in line-mode and also indent it."
 	   (set-mark (point))
 	   (setq b-last-yank-was-line nil))
 	 (yank-pop arg))))
+
+(defun b-insert-register (register)
+  (interactive "*cInsert Register:")
+  )
 
 ;;
 ;; Brief paging and scrolling commands
@@ -869,8 +971,8 @@ the word \"indent\"."
 	(when (and (/= b-undo-point 0)
 		   (/= point b-undo-point)
 		   (equal head b-undo-list-head))
-	  (if head
-	      (undo-boundary))
+	  (when head
+	    (undo-boundary))
 	  (setq buffer-undo-list (cons b-undo-point buffer-undo-list))))
 
       ;; Save point and the undo-list head for next time
@@ -880,8 +982,8 @@ the word \"indent\"."
 				 (cons (car head) (cdr head))
 				   head)))
     ;; Debug output
-    (if b-undo-debug-enabled
-	(b-undo-debug))))
+    (when b-undo-debug-enabled
+      (b-undo-debug))))
 
 (defun b-undo-debug ()
   (unless (active-minibuffer-window)
@@ -891,8 +993,8 @@ the word \"indent\"."
       (save-current-buffer
 	(set-buffer (get-buffer-create "*B Debug*"))
 	(insert "(" (number-to-string point) ") List: " (prin1-to-string undo-list) ?\n)
-	(if (or (eq this-command 'undo) (eq this-command 'redo))
-	    (insert "Pending: " (prin1-to-string (car pending)) ?\n))
+	(when (or (eq this-command 'undo) (eq this-command 'redo))
+	  (insert "Pending: " (prin1-to-string (car pending)) ?\n))
 	(goto-char 1)))))
 
 (defun b-undo-toggle-debug (&optional arg)
