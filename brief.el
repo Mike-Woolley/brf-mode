@@ -2,7 +2,7 @@
 
 ;; Copyright (C) 2000 Mike Woolley mike@bulsara.com
 ;; Author: Mike Woolley <mike@bulsara.com>
-;; Version: 1.04
+;; Version: 1.05
 ;; Keywords: brief emulator
 
 ;; This file is not part of Emacs
@@ -29,6 +29,12 @@
 ;;  and functions common to both retain their Emacs keybindings.
 
 ;;; Change Log:
+;;
+;;  Version 1.05 2001-05-21 Mike Woolley <mike@bulsara.com>
+;;  * Fixed some minor problems in the bookmark code.
+;;  * Now displays the bookmark number in the overlay.
+;;  * Turned `brief-protect-overlay' into a closure.
+;;  * Add command to remove bookmarks.
 ;;
 ;;  Version 1.04 2001-03-12 Mike Woolley <mike@bulsara.com>
 ;;  * Added bookmarks.
@@ -110,7 +116,7 @@ Set this to nil to conserve valuable mode line space."
 ;;
 ;; Version
 ;;
-(defconst brief-version "1.04"
+(defconst brief-version "1.05"
   "Version number of Brief mode.")
 
 (defun brief-version ()
@@ -214,18 +220,25 @@ With ARG, remove the bookmark instead." number)
   (let ((bookmark (assq number brief-bookmarks))
 	(start (brief-bol-position 1))
  	(end (brief-bol-position 2)))
-  (cond ((null bookmark)
+    (cond ((null bookmark)
 	   ;; Create a new bookmark
-	   (let ((marker (point-marker))
-		 (overlay (make-overlay start end)))
+	   (lexical-let ((marker (point-marker))
+			 (overlay (make-overlay start end (current-buffer) t nil)))
+	     (set-marker-insertion-type marker t) ; Insert before the marker
 	     (overlay-put overlay 'face 'brief-bookmark-face)
  	     (overlay-put overlay 'before-string (format "%d>" number))
 	     (overlay-put overlay 'help-echo (format "Bookmark %d" number))
+	     ;; XEmacs overlay compatibility doesn't support modification hook :-(
 	     (unless brief-xemacs-flag
-	       ;; XEmacs overlay compatibility doesn't support modification hook
-	       ;; Need another way to code this
-	       (overlay-put overlay 'modification-hooks '(brief-protect-overlay))
-	       (overlay-put overlay 'brief-bookmark-marker marker))
+	       (let ((protect-overlay
+		      #'(lambda (overlay after begin end &optional len)
+			  "Ensure the bookmark overlay is on the line containing the bookmark."
+			  (when after
+			    (save-excursion
+			      (goto-char marker)
+			      (move-overlay overlay (brief-bol-position 1) (brief-bol-position 2)))))))
+		 (overlay-put overlay 'modification-hooks (list protect-overlay))
+		 (overlay-put overlay 'insert-in-front-hooks (list protect-overlay))))
 	     ;; Add the new bookmark to the list
 	     (push (list number marker overlay) brief-bookmarks)))
 	  (t ;; Move bookmark to new location
@@ -235,13 +248,6 @@ With ARG, remove the bookmark instead." number)
 	     (move-marker marker (point) buffer)
 	     (move-overlay overlay start end buffer)))))
   (message "Bookmark %d dropped" number))
-
-(defun brief-protect-overlay (overlay after begin end &optional len)
-  "Prevent bookmark overlay from being split over multiple lines."
-  (when after
-      (save-excursion
-	(goto-char (overlay-get overlay 'brief-bookmark-marker))
-	(move-overlay overlay (brief-bol-position 1) (brief-bol-position 2)))))
 
 (defun brief-kill-bookmark (number)
   "Kill bookmark NUMBER."
