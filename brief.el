@@ -2,7 +2,7 @@
 
 ;; Copyright (C) 2000 Mike Woolley mike@bulsara.com
 ;; Author: Mike Woolley <mike@bulsara.com>
-;; Version: 1.03
+;; Version: 1.04
 ;; Keywords: brief emulator
 
 ;; This file is not part of Emacs
@@ -29,7 +29,12 @@
 ;;  and functions common to both retain their Emacs keybindings.
 
 ;;; Change Log:
-;; 
+;;
+;;  Version 1.04 2001-03-12 Mike Woolley <mike@bulsara.com>
+;;  * Added bookmarks.
+;;  * Moved the XEmacs specific code into functions.
+;;  * Removed the byte compiler warnings.
+;;
 ;;  Version 1.03 2001-02-22 Mike Woolley <mike@bulsara.com>
 ;;  * Added tab key handling.
 ;;  * newline-and-indent setup in global map.
@@ -88,6 +93,10 @@ Set this to nil to conserve valuable mode line space."
   :type 'string
   :group 'brief)
 
+(defface brief-bookmark-face '((t (:background "khaki")))
+  "Face used to show bookmark."
+  :group 'brief)
+
 (defcustom brief-load-hook nil
   "Hooks to run after loading the Brief emulator package."
   :type 'hook
@@ -101,7 +110,7 @@ Set this to nil to conserve valuable mode line space."
 ;;
 ;; Version
 ;;
-(defconst brief-version "1.03"
+(defconst brief-version "1.04"
   "Version number of Brief mode.")
 
 (defun brief-version ()
@@ -112,8 +121,38 @@ Set this to nil to conserve valuable mode line space."
 ;;
 ;; XEmacs compatibility
 ;;
-(defconst brief-xemacs-flag (featurep 'xemacs)
-  "Non-nil means this version of Emacs is XEmacs.")
+(eval-and-compile
+  (defconst brief-xemacs-flag (featurep 'xemacs)
+    "Non-nil means this version of Emacs is XEmacs."))
+
+;; Silence the byte compiler
+(eval-when-compile
+  (cond (brief-xemacs-flag
+	 (defvar mark-active nil)
+	 (defvar transient-mark-mode nil))
+	(t ; GNU Emacs
+	 (defvar zmacs-region-active-p nil)
+	 (defvar zmacs-regions nil)
+	 (defvar zmacs-region-stays nil)
+	 (fset 'zmacs-update-region nil)
+	 (fset 'zmacs-activate-region nil)
+	 (fset 'zmacs-deactivate-region nil))))
+
+;; Load XEmacs overlay compatibility
+(when brief-xemacs-flag
+  (require 'overlay))
+
+;; Function to get the position of the beginning of the line
+(cond ((fboundp 'line-beginning-position)
+       (defalias 'brief-bol-position 'line-beginning-position))
+      ((fboundp 'point-at-bol)
+       (defalias 'brief-bol-position 'point-at-bol))
+      (t
+       (defun brief-bol-position (&optional n)
+	 "Return the index of the character at the start of the line."
+	 (save-excursion
+	   (beginning-of-line n)
+	   (point)))))
 
 (defun brief-region-active-p ()
   "Emacs/XEmacs compatibility function to test for an active region."
@@ -130,17 +169,104 @@ Returns the previous setting."
     (prog1 transient-mark-mode
       (setq transient-mark-mode arg))))
 
+(defun brief-activate-region ()
+  "Ensure region is highlited correctly in XEmacs.
+This function does nothing in GNU Emacs."
+  (when brief-xemacs-flag
+    (if zmacs-region-active-p
+	(zmacs-update-region)
+      (zmacs-activate-region))))
+
+(defun brief-deactivate-region ()
+  "Ensure region is deactivated in XEmacs.
+This function does nothing in GNU Emacs."
+  (when (and brief-xemacs-flag
+	     zmacs-region-active-p)
+    (zmacs-deactivate-region)))
+
+(defun brief-keep-region ()
+  "Ensure that the current command keeps the region in XEmacs.
+This function does nothing in GNU Emacs."
+  (when brief-xemacs-flag
+    (setq zmacs-region-stays t)))
+
 ;;
 ;; Bookmarks
 ;;
 (defvar brief-bookmarks nil
-  "List of brief bookmarks.")
+  "List of Brief bookmarks.")
 
 (defun brief-make-set-bookmark (number)
-  )
+  "Generate a command which sets bookmark NUMBER at point.
+If the command is given a prefix argument, then the bookmark is removed."
+  `(lambda (&optional arg)
+     ,(format "Set Brief bookmark %d at point.
+With ARG, remove the bookmark instead." number)
+     (interactive "P")
+     (if arg
+	 (brief-kill-bookmark ,number)
+       (brief-set-bookmark ,number))))
 
-(defun brief-goto-bookmark (number)
-  )
+(defun brief-set-bookmark (number)
+  "Set bookmark NUMBER at point."
+  (interactive "NSet bookmark: ")
+  ;; Lookup the bookmark
+  (let ((bookmark (assq number brief-bookmarks))
+	(start (brief-bol-position 1))
+ 	(end (brief-bol-position 2)))
+  (cond ((null bookmark)
+	   ;; Create a new bookmark
+	   (let ((marker (point-marker))
+		 (overlay (make-overlay start end)))
+	     (overlay-put overlay 'face 'brief-bookmark-face)
+ 	     (overlay-put overlay 'before-string (format "%d>" number))
+	     (overlay-put overlay 'help-echo (format "Bookmark %d" number))
+	     (unless brief-xemacs-flag
+	       ;; XEmacs overlay compatibility doesn't support modification hook
+	       ;; Need another way to code this
+	       (overlay-put overlay 'modification-hooks '(brief-protect-overlay))
+	       (overlay-put overlay 'brief-bookmark-marker marker))
+	     ;; Add the new bookmark to the list
+	     (push (list number marker overlay) brief-bookmarks)))
+	  (t ;; Move bookmark to new location
+	   (let ((marker (second bookmark))
+		 (overlay (third bookmark))
+		 (buffer (current-buffer)))
+	     (move-marker marker (point) buffer)
+	     (move-overlay overlay start end buffer)))))
+  (message "Bookmark %d dropped" number))
+
+(defun brief-protect-overlay (overlay after begin end &optional len)
+  "Prevent bookmark overlay from being split over multiple lines."
+  (when after
+      (save-excursion
+	(goto-char (overlay-get overlay 'brief-bookmark-marker))
+	(move-overlay overlay (brief-bol-position 1) (brief-bol-position 2)))))
+
+(defun brief-kill-bookmark (number)
+  "Kill bookmark NUMBER."
+  (interactive "NKill Bookmark: ")
+  (let ((bookmark (assq number brief-bookmarks)))
+    (unless bookmark
+      (error "That bookmark has not been set"))
+    (let ((marker (second bookmark))
+	  (overlay (third bookmark)))
+      (move-marker marker nil)
+      (delete-overlay overlay))))
+
+(defun brief-jump-to-bookmark (number)
+  "Jump to bookmark NUMBER."
+  (interactive "NJump to Bookmark: ")
+  ;; Lookup the bookmark
+  (let ((bookmark (assq number brief-bookmarks)))
+    (unless bookmark
+      (error "That bookmark has not been set"))
+    (let* ((marker (second bookmark))
+	   (buffer (marker-buffer marker)))
+      (unless buffer
+	(error "That bookmark's buffer no longer exists"))
+      (switch-to-buffer buffer)
+      (goto-char marker))))
 
 ;;
 ;; Keymap
@@ -180,6 +306,13 @@ Returns the previous setting."
 	  (substitute-key-definition scroll-up-cmd 'brief-page-down map (current-global-map)))
       (if scroll-down-cmd
 	  (substitute-key-definition scroll-down-cmd 'brief-page-up map (current-global-map))))
+
+    ;; Setup the bookmarks on the M-digit keys, like in Brief
+    ;; Prefix args will have to be entered with the C-digit or C-U number methods...
+    (dotimes (digit 10)
+      (define-key map (vector (list 'meta (string-to-char (number-to-string digit))))
+	(brief-make-set-bookmark digit)))
+    (define-key map "\M-j" 'brief-jump-to-bookmark)
 
     (setq brief-mode-map map)))
 
@@ -287,11 +420,7 @@ line-marking after cursor motion commands."
 		    (forward-line -1)
 		    (set-mark brief-line-mark-max)))))
 
-      ;; Ensure resulting region is highlited correctly in XEmacs
-      (if brief-xemacs-flag
-	  (if zmacs-region-active-p
-	      (zmacs-update-region)
-	    (zmacs-activate-region))))))
+      (brief-activate-region))))
 
 (defun brief-mark-line (&optional arg)
   "Mark the current line from anywhere on the line.
@@ -330,8 +459,7 @@ Emulates the Brief copy function."
     (when (> (point) (mark))
       (forward-line -1))
     (move-to-column brief-line-mark-col))
-  (when (and brief-xemacs-flag zmacs-region-active-p)
-    (zmacs-deactivate-region)))
+  (brief-deactivate-region))
 
 ;;
 ;; Brief kill-region command
@@ -458,8 +586,7 @@ was killed in line-mode and also indent it."
 Paging up afterwards should return point to the same position.
 The optional argument specifies the number of pages to scroll."
   (interactive "P")
-  (if brief-xemacs-flag
-      (setq zmacs-region-stays t))
+  (brief-keep-region)
   (let ((pages (prefix-numeric-value arg)))
     (if (< pages 0)
 	(brief-page-up (- pages))
@@ -468,19 +595,18 @@ The optional argument specifies the number of pages to scroll."
 				next-screen-context-lines))
 	(decf pages)))))
 (put 'brief-page-down 'brief-scroll-command t)
-    
+
 (defun brief-page-up (&optional arg)
   "Scroll the current window down by one page, respecting `next-screen-context-lines'.
 Paging down afterwards should return point to the same position.
 The optional argument specifies the number of pages to scroll."
   (interactive "P")
-  (if brief-xemacs-flag
-      (setq zmacs-region-stays t))
+  (brief-keep-region)
   (let ((pages (prefix-numeric-value arg)))
     (if (< pages 0)
 	(brief-page-down (- pages))
       (while (and (> pages 0) (not (pos-visible-in-window-p (point-min))))
-	(brief-scroll-screen (- next-screen-context-lines 
+	(brief-scroll-screen (- next-screen-context-lines
 				(1- (window-height))))
 	(decf pages)))))
 (put 'brief-page-up 'brief-scroll-command t)
@@ -504,8 +630,7 @@ It should still work in the presence of hidden lines."
   "Scroll the current window down by one line.
 ARG specifies the number of lines to scroll, defaulting to 1."
   (interactive "P")
-  (if brief-xemacs-flag
-      (setq zmacs-region-stays t))
+  (brief-keep-region)
   (brief-scroll-line (prefix-numeric-value arg)))
 (put 'brief-row-up 'brief-scroll-command t)
 
@@ -513,8 +638,7 @@ ARG specifies the number of lines to scroll, defaulting to 1."
   "Scroll the current window up by one line.
 ARG specifies the number of lines to scroll, defaulting to 1."
   (interactive "P")
-  (if brief-xemacs-flag
-      (setq zmacs-region-stays t))
+  (brief-keep-region)
   (brief-scroll-line (- (prefix-numeric-value arg))))
 (put 'brief-row-down 'brief-scroll-command t)
 
@@ -549,7 +673,7 @@ consecutive use moves point to the beginning of the buffer."
 	(move-to-window-line 0))
     (beginning-of-line))
   (setq brief-last-last-command last-command))
-      
+
 (defun brief-end ()
   "\"End\" the point, the way Brief does it.
 The first use moves point to end of the line.  Second
@@ -663,7 +787,6 @@ the word \"indent\"."
 ;;
 ;; Brief minor mode
 ;;
-
 (defvar brief-prev-mark-mode nil
   "Previous value of transient mark mode.")
 (defvar brief-prev-c-m nil
@@ -702,11 +825,8 @@ Key bindings:
 	 (brief-transient-mark-mode brief-prev-mark-mode))))
 
 ;; Add Brief as a minor mode
-(if (fboundp 'add-minor-mode)
-    (add-minor-mode 'brief-mode 'brief-mode-modeline-string
-		    brief-mode-map nil 'brief-mode)
-  (add-to-list 'minor-mode-alist '(brief-mode brief-mode-modeline-string))
-  (add-to-list 'minor-mode-map-alist (cons 'brief-mode brief-mode-map)))
+(add-to-list 'minor-mode-alist '(brief-mode brief-mode-modeline-string))
+(add-to-list 'minor-mode-map-alist (cons 'brief-mode brief-mode-map))
 
 ;; Load finished
 (run-hooks 'brief-load-hook)
