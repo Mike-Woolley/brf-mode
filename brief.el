@@ -1,6 +1,9 @@
-;;; brief.el - Brief editor emulator
+;;; brief.el --- Brief editor emulator
 
 ;; Copyright (C) 2000 Mike Woolley mike@bulsara.com
+;; Author: Mike Woolley <mike@bulsara.com>
+;; Version: 1.03
+;; Keywords: brief emulator
 
 ;; This file is not part of Emacs
 
@@ -19,19 +22,131 @@
 ;; Free Software Foundation, Inc., 59 Temple Place - Suite 330,
 ;; Boston, MA 02111-1307, USA.
 
-;;; Description:
+;;; Commentary:
 ;;
 ;;  This package provides an emulation of the Brief editor under Emacs.
 ;;  However, only those functions which don't exist in Emacs are emulated
 ;;  and functions common to both retain their Emacs keybindings.
+
+;;; Change Log:
+;; 
+;;  Version 1.03 2001-02-22 Mike Woolley <mike@bulsara.com>
+;;  * Added tab key handling.
+;;  * newline-and-indent setup in global map.
+;;  * Tidied up doc strings.
+;;
+;;  Version 1.02 2001-02-15 Mike Woolley <mike@bulsara.com>
+;;  * Changed M-d to delete a line rather than kill a line.
+;;
+;;  Version 1.01 - Mike Woolley <mike@bulsara.com>
+;;  * Added Brief-style Home and End key handling
+;;
+;;  Version 1.00 - Mike Woolley <mike@bulsara.com>
+;;  * Initial version.
+;;  * Cursor motion undo not working yet.
+;;
+
+;;; Code:
+
+(eval-when-compile
+  (require 'cl))
 
 (defgroup brief nil
   "Emulator for Brief."
   :prefix "brief-"
   :group 'emulations)
 
+;;;###autoload
+(defcustom brief-mode nil
+  "Track status of Brief mode.
+A value of nil means Brief mode is not enabled.  A value of t
+indicates Brief mode is enabled.
+
+Setting this variable directly does not take effect;
+use either \\[execute-extended-command] customize or the function `brief-mode'."
+  :type 'boolean
+  :set (lambda (symbol value) (brief-mode (or value 0)))
+  :initialize 'custom-initialize-default
+  :require 'brief
+  :version "20.4"
+  :group 'brief)
+
+(defcustom brief-undo-enable nil
+  "Enable cursor motion undo."
+  :type 'boolean
+  :set (lambda (symbol value)
+	 (if value
+	     (add-hook 'post-command-hook 'brief-undo-post-command-hook)
+	   (remove-hook 'post-command-hook 'brief-undo-post-command-hook))
+	 (set-default symbol value))
+  :initialize 'custom-initialize-default
+  :group 'brief)
+
+(defcustom brief-mode-modeline-string " Brief"
+  "String to display in the modeline when Brief mode is enabled.
+Set this to nil to conserve valuable mode line space."
+  :type 'string
+  :group 'brief)
+
+(defcustom brief-load-hook nil
+  "Hooks to run after loading the Brief emulator package."
+  :type 'hook
+  :group 'brief)
+
+(defcustom brief-mode-hook nil
+  "Hook run by the function `brief-mode'."
+  :type 'hook
+  :group 'brief)
+
+;;
+;; Version
+;;
+(defconst brief-version "1.03"
+  "Version number of Brief mode.")
+
+(defun brief-version ()
+  "Version number of Brief mode."
+  (interactive)
+  (message (concat "Brief version " brief-version)))
+
+;;
+;; XEmacs compatibility
+;;
+(defconst brief-xemacs-flag (featurep 'xemacs)
+  "Non-nil means this version of Emacs is XEmacs.")
+
+(defun brief-region-active-p ()
+  "Emacs/XEmacs compatibility function to test for an active region."
+  (if brief-xemacs-flag
+      zmacs-region-active-p
+    mark-active))
+
+(defun brief-transient-mark-mode (arg)
+  "Emacs/XEmacs compatibility function to set transient mark mode.
+Returns the previous setting."
+  (if brief-xemacs-flag
+      (prog1 zmacs-regions
+	(setq zmacs-regions arg))
+    (prog1 transient-mark-mode
+      (setq transient-mark-mode arg))))
+
+;;
+;; Bookmarks
+;;
+(defvar brief-bookmarks nil
+  "List of brief bookmarks.")
+
+(defun brief-make-set-bookmark (number)
+  )
+
+(defun brief-goto-bookmark (number)
+  )
+
+;;
+;; Keymap
+;;
 (defvar brief-mode-map nil
-  "Local keymap for Brief emulation mode.")
+  "Local keymap for Brief mode.")
 (unless brief-mode-map
   (let ((map (make-sparse-keymap)))
     ;; Put our definitions on the same keys as Brief
@@ -47,6 +162,7 @@
     (define-key map [(meta down)] 'brief-row-down)
     (define-key map [(home)] 'brief-home)
     (define-key map [(end)] 'brief-end)
+    (define-key map "\t" 'brief-tab)
 
     ;; Also put them on the Emacs keys
     (substitute-key-definition 'kill-ring-save 'brief-copy-region map (current-global-map))
@@ -67,71 +183,13 @@
 
     (setq brief-mode-map map)))
 
-;;;###autoload
-(defcustom brief-mode nil
-  "Track status of Brief emulation mode.
-A value of nil means Brief mode is not enabled.  A value of t
-indicates Brief mode is enabled.
-
-Setting this variable directly does not take effect;
-use either M-x customize or the function `brief-mode'."
-  :type 'boolean
-  :set (lambda (symbol value) (brief-mode (or value 0)))
-  :initialize 'custom-initialize-default
-  :require 'brief
-  :version "20.4"
-  :group 'brief)
-
-(defcustom brief-undo-enable nil
-  "Enable cursor motion undo."
-  :type 'boolean
-  :set (lambda (symbol value)
-	 (if value
-	     (add-hook 'post-command-hook 'brief-undo-post-command-hook)
-	   (remove-hook 'post-command-hook 'brief-undo-post-command-hook))
-	 (set-default symbol value))
-  :initialize 'custom-initialize-default
-  :group 'brief)
-
-(defcustom brief-mode-modeline-string " Brief"
-  "String to display in the modeline when Brief emulation mode is enabled.
-Set this to nil to conserve valuable mode line space."
-  :type 'string
-  :group 'brief)
-
-(defcustom brief-load-hook nil
-  "Hooks to run after loading the Brief emulator package."
-  :type 'hook
-  :group 'brief)
-
-(defcustom brief-mode-hook nil
-  "Hook run by the function `brief-mode'."
-  :type 'hook
-  :group 'brief)
-
-(defconst brief-version "1.02"
-  "The version of the Brief emulator.")
-
-(defun brief-version ()
-  "Version number of the Brief emulator package."
-  (interactive)
-  (message (concat "Brief version " brief-version)))
-
-(defconst brief-xemacs-flag (featurep 'xemacs)
-  "Indicate if this version of Emacs is XEmacs.")
-
-(defun brief-region-active-p()
-  "Emacs/XEmacs compatibility function to test for an active region."
-  (if brief-xemacs-flag
-      zmacs-region-active-p
-    mark-active))
-
 ;;
 ;; Brief insert-line command
 ;;
 (defun brief-insert-line (&optional arg)
-  "Create a new line underneath the current one and place point on the new line indented.
-Emulates the Brief insert-line function. With argument, do not indent."
+  "Open a new line underneath the current one and indent point.
+Do not break current line.  Emulates the Brief insert-line function.
+With ARG, do not indent."
   (interactive "*P")
   (end-of-line)
   (if arg
@@ -143,7 +201,8 @@ Emulates the Brief insert-line function. With argument, do not indent."
 ;;
 (defun brief-delete-line (&optional arg)
   "Delete the current line from anywhere on the line.
-Emulates the Brief delete-line function. With argument, do it that many times."
+Emulates the Brief delete-line function.
+With ARG, do it that many times."
   (interactive "*P")
   (let ((count (prefix-numeric-value arg))
 	(column (current-column))
@@ -163,7 +222,7 @@ Emulates the Brief delete-line function. With argument, do it that many times."
 ;;
 (defun brief-kill-line (&optional arg)
   "Kill the current line from anywhere on the line.
-With argument, do it that many times."
+With ARG, do it that many times."
   (interactive "*P")
   (let ((count (prefix-numeric-value arg))
 	(column (current-column)))
@@ -186,7 +245,7 @@ The mark is positioned here if point is above or on this line.")
 This is restored after saving/killing the region.")
 
 (defun brief-start-line-marking ()
-  "Starts line-marking mode."
+  "Start line-marking mode."
   (make-local-hook 'post-command-hook)
   (add-hook 'post-command-hook 'brief-mark-line-hook nil t))
 
@@ -199,7 +258,7 @@ This is restored after saving/killing the region.")
   (memq 'brief-mark-line-hook post-command-hook))
 
 (defun brief-mark-line-hook ()
-  "Ensures that the point and mark are correctly positioned for
+  "Ensure that the point and mark are correctly positioned for
 line-marking after cursor motion commands."
   (if (not (brief-region-active-p))
       (brief-stop-line-marking)
@@ -236,7 +295,8 @@ line-marking after cursor motion commands."
 
 (defun brief-mark-line (&optional arg)
   "Mark the current line from anywhere on the line.
-Emulates the Brief mark-line function. With argument, do it that many times."
+Emulates the Brief mark-line function.
+With ARG, do it that many times."
   (interactive "P")
   (let ((lines (prefix-numeric-value arg)))
     (when (/= lines 0)
@@ -294,7 +354,7 @@ Emulates the Brief cut function."
 ;;
 (defun brief-delete (&optional arg)
   "Delete the current active region.
-If there is no active region then arg characters following point are deleted.
+If there is no active region then ARG characters following point are deleted.
 Emulates the Brief delete function."
   (interactive "*P")
   (if (not (brief-region-active-p))
@@ -308,7 +368,7 @@ Emulates the Brief delete function."
 ;; Brief Yank & Yank-pop commands
 ;;
 (defun brief-set-line-kill ()
-  "Make the front of the kill-ring a line-mode kill.
+  "Make the front of the `kill-ring' a line-mode kill.
 This is done by adding a text property."
   ;; Ensure the line is terminated with a newline
   (let* ((kill (car kill-ring))
@@ -319,23 +379,23 @@ This is done by adding a text property."
   (put-text-property 0 1 'brief-line-kill t (car kill-ring)))
 
 (defun brief-clear-line-kill (pos)
-  "Remove the line-mode kill property from text in the buffer."
+  "Remove the line-mode kill property from text at position POS in the buffer."
   (remove-text-properties pos (1+ pos) '(brief-line-kill t)))
 
 (defun brief-line-kill-p (string)
-  "Test if a string is a line-mode kill."
+  "Test if STRING is a line-mode kill."
   (get-text-property 0 'brief-line-kill string))
 
 (defvar brief-yank-col 0
-  "The original column where brief-yank was initiated.
+  "The original column where `brief-yank' was initiated.
 This is restored after the yank.")
 
 (defvar brief-last-yank-was-line nil
   "True if the last yank was from a line-mode kill.")
 
 (defun brief-yank (&optional arg)
-  "Identical to the normal yank command, but correctly inserts text that
-was killed in line-mode and also indents it."
+  "Identical to the normal `yank' command, but correctly insert text that
+was killed in line-mode and also indent it."
   (interactive "*P")
   (setq this-command 'yank)
   (setq brief-yank-col (current-column))
@@ -356,8 +416,8 @@ was killed in line-mode and also indents it."
 	 (setq brief-last-yank-was-line nil))))
 
 (defun brief-yank-pop (arg)
-  "Identical to the normal yank-pop command, but correctly inserts text that
-was killed in line-mode and also indents it."
+  "Identical to the normal `yank-pop' command, but correctly insert text that
+was killed in line-mode and also indent it."
   (interactive "*p")
   (unless (eq last-command 'yank)
     (error "Previous command was not a yank"))
@@ -391,11 +451,10 @@ was killed in line-mode and also indents it."
 ;; returns to the same position after paging up and down.
 ;;
 (defvar brief-temporary-goal-column 0
-  "The original column from the start of a sequence Brief
-paging and scrolling commands.")
+  "Original column of the start of a sequence Brief scrolling commands.")
 
 (defun brief-page-down (&optional arg)
-  "Scroll the current window up by one page, respecting next-screen-context-lines.
+  "Scroll the current window up by one page, respecting `next-screen-context-lines'.
 Paging up afterwards should return point to the same position.
 The optional argument specifies the number of pages to scroll."
   (interactive "P")
@@ -411,7 +470,7 @@ The optional argument specifies the number of pages to scroll."
 (put 'brief-page-down 'brief-scroll-command t)
     
 (defun brief-page-up (&optional arg)
-  "Scroll the current window down by one page, respecting next-screen-context-lines.
+  "Scroll the current window down by one page, respecting `next-screen-context-lines'.
 Paging down afterwards should return point to the same position.
 The optional argument specifies the number of pages to scroll."
   (interactive "P")
@@ -427,9 +486,9 @@ The optional argument specifies the number of pages to scroll."
 (put 'brief-page-up 'brief-scroll-command t)
 
 (defun brief-scroll-screen (lines)
-  "Scroll current window by given number of lines, but keep the cursor's relative
+  "Scroll current window by LINES, but keep the cursor's relative
 position in the window.
-This is a helper function used by brief-page-up/down.
+This is a helper function used by `brief-page-up' and `brief-page-down'.
 It should still work in the presence of hidden lines."
   (unless (brief-scroll-command-p last-command)
     (setq brief-temporary-goal-column (current-column)))
@@ -443,7 +502,7 @@ It should still work in the presence of hidden lines."
 
 (defun brief-row-up (&optional arg)
   "Scroll the current window down by one line.
-The optional argument specifies the number of lines to scroll, defaulting to 1."
+ARG specifies the number of lines to scroll, defaulting to 1."
   (interactive "P")
   (if brief-xemacs-flag
       (setq zmacs-region-stays t))
@@ -452,7 +511,7 @@ The optional argument specifies the number of lines to scroll, defaulting to 1."
 
 (defun brief-row-down (&optional arg)
   "Scroll the current window up by one line.
-The optional argument specifies the number of lines to scroll, defaulting to 1."
+ARG specifies the number of lines to scroll, defaulting to 1."
   (interactive "P")
   (if brief-xemacs-flag
       (setq zmacs-region-stays t))
@@ -460,7 +519,7 @@ The optional argument specifies the number of lines to scroll, defaulting to 1."
 (put 'brief-row-down 'brief-scroll-command t)
 
 (defun brief-scroll-line (lines)
-  "Scroll the current window down by the given number of lines.
+  "Scroll the current window down by LINES.
 This is a helper function used by brief-row-up/down."
   (unless (brief-scroll-command-p last-command)
     (setq brief-temporary-goal-column (current-column)))
@@ -468,7 +527,7 @@ This is a helper function used by brief-row-up/down."
   (move-to-column brief-temporary-goal-column))
 
 (defun brief-scroll-command-p (cmd)
-  "Determine if the given command is a Brief scrolling command."
+  "Non-nil if CMD is a Brief scrolling command."
   (and (symbolp cmd) (get cmd 'brief-scroll-command)))
 
 ;;
@@ -503,6 +562,38 @@ consecutive use moves point to the end of the buffer."
 	(move-to-window-line -1))
     (end-of-line))
   (setq brief-last-last-command last-command))
+
+;;
+;; Tab key handling
+;;
+(defun brief-tab (&optional arg)
+  "Indent the region if the region is active, otherwise indent the
+current line using the function which would ordinarily be bound to the tab key."
+  (interactive "P")
+  (let ((tab-fn (or (local-key-binding "\t")
+		    (global-key-binding "\t"))))
+    (cond ((or (null tab-fn) (brief-indent-cmd-p tab-fn))
+	   ;; If the region is active, indent it
+	   (if (brief-region-active-p)
+	       (indent-region (region-beginning) (region-end) arg)
+	     ;; Otherwise, call the usual binding for the tab key
+	     (if tab-fn
+		 (if arg
+		     (funcall tab-fn arg)
+		   (funcall tab-fn))
+	       ;; No binding found, so call sensible default
+	       (indent-for-tab-command arg))))
+	  (t
+	   ;; If the normal binding is not an indent command, just invoke it
+	   (if arg
+	       (funcall tab-fn arg)
+	     (funcall tab-fn))))))
+
+(defun brief-indent-cmd-p (cmd)
+  "Non-nil if CMD is an indent command, nil otherwise.
+This is determined heuristically by seeing if the command name contains
+the word \"indent\"."
+  (and (symbolp cmd) (string-match "indent" (symbol-name cmd))))
 
 ;;
 ;; Brief Cursor Motion Undo
@@ -572,9 +663,17 @@ consecutive use moves point to the end of the buffer."
 ;;
 ;; Brief minor mode
 ;;
+
+(defvar brief-prev-mark-mode nil
+  "Previous value of transient mark mode.")
+(defvar brief-prev-c-m nil
+  "Previous global binding of C-m.")
+(defvar brief-prev-c-j nil
+  "Previous global binding of C-j.")
+
 ;;;###autoload
 (defun brief-mode (&optional arg)
-  "Toggle Brief emulation minor mode.
+  "Toggle Brief minor mode.
 With ARG, turn Brief mode on if ARG is positive, off otherwise.
 
 Key bindings:
@@ -586,13 +685,21 @@ Key bindings:
 	    (not brief-mode)
 	  (> (prefix-numeric-value arg) 0)))
 
-  (when brief-mode
-    ;; Force transient-mark-mode.
-    (if brief-xemacs-flag
-	(setq zmacs-regions t)
-      (transient-mark-mode t))
-    ;; Run mode hook
-    (run-hooks 'brief-mode-hook)))
+  (cond (brief-mode
+	 ;; Force transient-mark-mode, remember old setting
+	 (setq brief-prev-mark-mode (brief-transient-mark-mode t))
+	 ;; Setup return to always indent
+	 (setq brief-prev-c-m (global-key-binding "\C-m"))
+	 (setq brief-prev-c-j (global-key-binding "\C-j"))
+	 (global-set-key "\C-m" 'newline-and-indent)
+	 (global-set-key "\C-j" 'newline)
+	 ;; Run mode hook
+	 (run-hooks 'brief-mode-hook))
+	(t
+	 ;; Restore old settings
+	 (global-set-key "\C-m" brief-prev-c-m)
+	 (global-set-key "\C-j" brief-prev-c-j)
+	 (brief-transient-mark-mode brief-prev-mark-mode))))
 
 ;; Add Brief as a minor mode
 (if (fboundp 'add-minor-mode)
