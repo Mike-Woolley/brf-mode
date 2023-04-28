@@ -53,29 +53,43 @@
 (defconst brf-undo-debug-buffer-name "*Brf Debug*"
   "Name of undo debug buffer.")
 
+(defvar brf-real-this-command nil
+  "Real name of the current command.")
+(add-hook 'pre-command-hook
+	  (lambda () (setq brf-real-this-command this-command)))
+
+(defun brf-undo-command-p ()
+  "Return non-nil if COMMAND is an undo command."
+  (memq brf-real-this-command '(undo undo-only)))
+
+(defun brf-redo-command-p ()
+  "Return non-nil if COMMAND is a redo command."
+  (memq brf-real-this-command '(redo undo-redo)))
+
 (defun brf-undo-post-command-hook ()
   "Post-command hook to implement cursor-motion undo."
   ;; Put point on the undo list if necessary
   (when (listp buffer-undo-list)
     (let ((point (point))
 	  (head (car buffer-undo-list)))
-      ;; When head is not an undo boundary, Emacs is still amalgamating the undo group
-      ;; So it's definitely not cursor motion
       (unless head
-	(setq head (cadr buffer-undo-list))		; Real head is the second item
-	(unless (eq this-command 'redo)			; ie (redo) from Redo(+).el
-	  ;; Check if there was cursor motion with no other changes
-	  (when (and (/= point brf-undo-point) 		; Point has moved
-		     (or (eq head brf-undo-list-head) 	; and a change has not been made
-			 (and (integerp head)		; or previous change was cursor motion
-			      (null (cl-caddr buffer-undo-list)))))
-	    (setq buffer-undo-list (cons brf-undo-point buffer-undo-list))
-	    ;; If we're undoing then the cursor motion was a redo, so mark it as such
-	    (when (eq this-command 'undo)
-	      (puthash buffer-undo-list
-		       (if (or undo-in-region (eq buffer-undo-list pending-undo-list))
-			   t
-			 pending-undo-list)
+	(setq head (cadr buffer-undo-list)))		; Real head is the second item
+      (unless (brf-redo-command-p)			; Ignore if this is a redo
+	;; Check if there was cursor motion with no other changes
+	(when (and (/= point brf-undo-point) 		; Point has moved
+		   (eq head brf-undo-list-head)) 	; and a change has not been made
+	  (setq buffer-undo-list (cons brf-undo-point buffer-undo-list)
+		head brf-undo-point)
+	  ;; If we're undoing then the cursor motion is a redo, so mark it as such...
+	  ;; Copied verbatim from `undo' in simple.el (unfortunately it's not in its own function)
+	  (when (brf-undo-command-p)
+	    (let ((list buffer-undo-list))
+	      (puthash list
+		       (cond (undo-in-region 'undo-in-region)
+			     ((eq list pending-undo-list)
+			      (or (gethash list undo-equiv-table)
+				  'empty))
+			     (t pending-undo-list))
 		       undo-equiv-table))
 	    ;; Add the terminal undo boundary
 	    (undo-boundary))))
@@ -103,14 +117,20 @@
 	    (set-buffer buffer)
 	    (goto-char (point-max))
 	    (let ((log-point (point))	; Current point in the debug buffer
-		  (print-length 15)	; Only show this many undo elements
+		  (print-length 20)	; Only show this many undo elements
 		  (print-level 2))	; and only 2 deep
-	      ;; Show point and the current undo-list
-	      (insert buffer-name " (" (number-to-string point) "): " (prin1-to-string undo-list) ?\n)
+	      ;; Show point, the current undo-list and its length
+	      (insert buffer-name " (" (number-to-string point) "): " (prin1-to-string undo-list)
+		      " (#" (prin1-to-string (length undo-list)) ")" ?\n)
 	      ;; Also show what's on the pending list when we're undoing/redoing
-	      (when (or (eq this-command 'undo)
-			(eq this-command 'redo))
-		(insert (prin1-to-string this-command) " pending: " (prin1-to-string pending) ?\n))
+	      (when (or (brf-undo-command-p) (brf-redo-command-p))
+		(insert (prin1-to-string brf-real-this-command) " pending: " (prin1-to-string pending)
+			(if (listp pending) (concat " (#" (prin1-to-string (length pending)) ")") "") ?\n)
+		;; Show the matching Equiv table entry
+		(while (null (car undo-list))
+		  (setq undo-list (cdr undo-list)))
+		(insert "Equiv(" (prin1-to-string (car undo-list)) "): "
+			(prin1-to-string (gethash undo-list undo-equiv-table)) ?\n))
 	      ;; Make sure the latest debug line is visible
 	      (when (and (window-live-p window)
 			 (not (pos-visible-in-window-p log-point window)))

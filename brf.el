@@ -97,14 +97,10 @@ Set this to nil to conserve valuable mode line space."
     (define-key map "\M-l" 'brf-mark-line)
     (when (brf-column-marking-supported-p)
       (define-key map "\M-c" 'brf-mark-column))
-    (when (fboundp 'redo)
-      (define-key map "\M-r" 'redo))
     (define-key map [(insert)] 'brf-yank)
     (define-key map [(kp-insert)] 'brf-yank)
     (define-key map [(kp-add)] 'brf-copy-region)
     (define-key map [(kp-subtract)] 'brf-kill-region)
-    (define-key map [(kp-multiply)] 'undo)
-    (define-key map "\M-u" 'undo)
     (define-key map [(delete)] 'brf-delete)
     (define-key map [(kp-delete)] 'brf-delete)
     (define-key map [(meta up)] 'brf-row-up)
@@ -194,6 +190,41 @@ Set this to nil to conserve valuable mode line space."
     map)
   "Local keymap for Brf mode.")
 
+;;
+;; Configure the undo/redo keys according to which functions are available
+;;
+(cl-flet ((set-undo/redo-keys (map undo-fn redo-fn)
+			      (when undo-fn
+				(define-key map "\M-u" undo-fn)
+				(define-key map [(kp-multiply)] undo-fn))
+			      (when redo-fn
+				(define-key map "\M-r" redo-fn))))
+
+  (cond ((or (featurep 'redo) (featurep 'redo+))
+	 ;; Redo/redo+
+	 (set-undo/redo-keys brf-mode-map 'undo 'redo)
+	 (when (fboundp 'undo-redo)
+	   ;; Replace builtin `undo-redo' key mapping with `redo'
+	   (substitute-key-definition 'undo-redo 'redo brf-mode-map (current-global-map))))
+
+	;; Builtin `undo-only' & `undo-redo'
+	((fboundp 'undo-redo)
+	 (set-undo/redo-keys brf-mode-map 'undo-only 'undo-redo)
+	 ;; Replace `undo' key mapping with `undo-only'
+	 (substitute-key-definition 'undo 'undo-only brf-mode-map (current-global-map))
+	 (define-key brf-mode-map [tool-bar undo] 'undo-only)
+	 ;; Create a toolbar item for redo
+	 (when (display-graphic-p)
+	   (tool-bar-add-item-from-menu 'undo-redo "redo" nil :visible 'brf-mode)
+	   ;; Move the item next to undo
+	   (let ((global-toolbar-map (default-value 'tool-bar-map)))
+	     (define-key-after global-toolbar-map [undo-redo]
+	       (cdr (assq 'undo-redo global-toolbar-map)) 'undo))))
+
+	;; Only `undo', so no redo
+	(t
+	 (set-undo/redo-keys brf-mode-map 'undo nil))))
+
 ;;;
 ;;; Menu
 ;;;
@@ -274,11 +305,12 @@ and MAP and PATH are as defined in `easy-menu-add-item'."
 ;; only option is to change the base settings (in a way that still works correctly when Brf-mode is off). Note also that
 ;; the keyboard equivalents for the remapped commands do not appear in the menu for presumably the same reason...
 (let ((cut-enable '(and (or brf-mode mark-active) (not buffer-read-only)))
-      (copy-enable '(or brf-mode mark-active)))
+      (copy-enable '(or brf-mode mark-active))
+      (global-toolbar-map (default-value 'tool-bar-map)))
   (brf-set-menu-item-property global-map '(menu-bar edit) 'cut :enable cut-enable)
-  (brf-set-menu-item-property tool-bar-map '() 'cut :enable cut-enable)
+  (brf-set-menu-item-property global-toolbar-map '() 'cut :enable cut-enable)
   (brf-set-menu-item-property global-map '(menu-bar edit) 'copy :enable copy-enable)
-  (brf-set-menu-item-property tool-bar-map '() 'copy :enable copy-enable))
+  (brf-set-menu-item-property global-toolbar-map '() 'copy :enable copy-enable))
 
 ;; The base definition of Cut has an explicit :keys entry. This is unnecessary and causes the keyboard equivalent to
 ;; show as "M-x ns-copy-including-secondary" in our case, so remove it...
